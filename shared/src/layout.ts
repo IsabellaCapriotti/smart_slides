@@ -23,6 +23,13 @@ const REGION_RECTS: Record<LayoutId, Partial<Record<Region, Rect>>> = {
     right: { x: 8.4, y: 1.85, w: 4.3, h: 4.8 },
     footer: { x: 0.6, y: 6.85, w: 12.1, h: 0.4 },
   },
+  // Mirror image of `split`: narrow column on the left, wide on the right. Region names are visual positions.
+  'split-flipped': {
+    header: { x: 0.6, y: 0.55, w: 12.1, h: 1.1 },
+    left: { x: 0.6, y: 1.85, w: 4.3, h: 4.8 },
+    right: { x: 5.2, y: 1.85, w: 7.5, h: 4.8 },
+    footer: { x: 0.6, y: 6.85, w: 12.1, h: 0.4 },
+  },
   full: {
     header: { x: 0.6, y: 0.55, w: 12.1, h: 1.1 },
     main: { x: 0.6, y: 1.85, w: 12.1, h: 4.8 },
@@ -37,13 +44,30 @@ export function regionsFor(layout: LayoutId): Region[] {
 export const LAYOUT_DESCRIPTIONS: Record<LayoutId, string> = {
   title: 'regions: main (title + subtitle, vertically centred), footer',
   split: 'regions: header, left (wide), right (narrow), footer',
+  'split-flipped': 'mirror of split: regions header, left (narrow), right (wide), footer',
   full: 'regions: header, main (full width), footer',
 };
+
+/**
+ * Switching between `split` and `split-flipped` mirrors the slide: elements swap left/right so each
+ * keeps its width (a chart in the wide column stays in the wide column).
+ */
+export function changeLayout(slide: Slide, layout: LayoutId): Slide {
+  const isSplit = (l: LayoutId) => l === 'split' || l === 'split-flipped';
+  const mirror = isSplit(slide.layout) && isSplit(layout) && slide.layout !== layout;
+  const swap = (r: Region): Region => (r === 'left' ? 'right' : r === 'right' ? 'left' : r);
+  const next: Slide = {
+    ...slide,
+    layout,
+    elements: mirror ? slide.elements.map((el) => ({ ...el, region: swap(el.region) })) : slide.elements,
+  };
+  return normalizeSlide(next);
+}
 
 /** Move any element whose region is not valid for the layout to the closest valid one. */
 export function normalizeSlide(slide: Slide): Slide {
   const valid = regionsFor(slide.layout);
-  const fallback: Record<LayoutId, Region> = { title: 'main', split: 'left', full: 'main' };
+  const fallback: Record<LayoutId, Region> = { title: 'main', split: 'left', 'split-flipped': 'right', full: 'main' };
   return {
     ...slide,
     elements: slide.elements.map((el) => {

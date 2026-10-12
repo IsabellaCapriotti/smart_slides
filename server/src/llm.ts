@@ -7,6 +7,8 @@ export interface ToolCall {
   id: string;
   name: string;
   input: unknown;
+  /** Set when the model's arguments were not valid JSON (usually cut off by the token limit). */
+  argsError?: string;
   /** Provider-specific metadata that must be echoed back (e.g. Gemini thought signatures). */
   extra?: unknown;
 }
@@ -33,7 +35,7 @@ interface Provider {
     messages: Msg[];
     maxTokens: number;
     onText: (delta: string) => void;
-  }): Promise<{ text: string; toolCalls: ToolCall[] }>;
+  }): Promise<{ text: string; toolCalls: ToolCall[]; /** The reply hit the output-token limit. */ truncated?: boolean }>;
 }
 
 function rawSchema(schema: z.ZodType): Record<string, unknown> {
@@ -112,6 +114,7 @@ function anthropicProvider(): Provider {
         toolCalls: final.content
           .filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
           .map((b) => ({ id: b.id, name: b.name, input: b.input })),
+        truncated: final.stop_reason === 'max_tokens',
       };
     },
   };
@@ -178,6 +181,17 @@ function openAiCompatibleProvider(cfg: {
     }
   };
 
+  const argsError = (s: string | undefined): string | undefined => {
+    if (!s) return undefined;
+    try {
+      JSON.parse(s);
+      return undefined;
+    } catch {
+      console.warn(`Tool-call arguments were not valid JSON (${s.length} chars, probably cut off).`);
+      return 'The arguments were not valid JSON (the reply was probably cut off).';
+    }
+  };
+
   return {
     label: cfg.label,
     model: cfg.model,
@@ -241,10 +255,13 @@ function openAiCompatibleProvider(cfg: {
           id: c.id || `call_${Date.now()}_${i}`,
           name: c.function.name,
           input: parseArgs(c.function.arguments),
+          argsError: argsError(c.function.arguments),
           extra: (c as { extra_content?: unknown }).extra_content,
         });
       });
-      return { text, toolCalls };
+      const truncated = res.choices[0]?.finish_reason === 'length';
+      if (truncated) console.warn(`Reply from ${cfg.model} hit the output-token limit (max_tokens=${budget(maxTokens)}).`);
+      return { text, toolCalls, truncated };
     },
   };
 }

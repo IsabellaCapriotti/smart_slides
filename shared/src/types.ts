@@ -1,7 +1,7 @@
 export const REGIONS = ['header', 'left', 'right', 'main', 'footer'] as const;
 export type Region = (typeof REGIONS)[number];
 
-export const LAYOUTS = ['title', 'split', 'full'] as const;
+export const LAYOUTS = ['title', 'split', 'split-flipped', 'full'] as const;
 export type LayoutId = (typeof LAYOUTS)[number];
 
 export const CHART_TYPES = ['bar', 'stacked-bar', 'line', 'area', 'pie', 'scatter'] as const;

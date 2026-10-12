@@ -5,6 +5,7 @@ import {
   LAYOUT_DESCRIPTIONS,
   REGIONS,
   THEMES,
+  changeLayout,
   normalizeSlide,
   summarizeDeck,
   uid,
@@ -106,7 +107,9 @@ const tools = {
   },
   set_slide_layout: {
     name: 'set_slide_layout',
-    description: 'Change a slide layout. Elements whose region does not exist in the new layout are moved automatically.',
+    description:
+      'Change a slide layout. Elements whose region does not exist in the new layout are moved automatically. ' +
+      'Switching between "split" and "split-flipped" MIRRORS the slide: left and right contents swap, so each element keeps its width (the wide column stays wide). Use this for "flip the slide" / "swap the sides" requests.',
     schema: z.object({ slideId: z.string(), layout: z.enum(LAYOUTS) }),
   },
   delete_slide: {
@@ -297,8 +300,7 @@ async function execute(ctx: Ctx, name: ToolName, raw: unknown): Promise<{ result
     case 'set_slide_layout': {
       const { slideId, layout } = input as Input<'set_slide_layout'>;
       const slide = findSlide(deck, slideId);
-      slide.layout = layout;
-      Object.assign(slide, normalizeSlide(slide));
+      Object.assign(slide, changeLayout(slide, layout));
       return { result: `Layout is now ${layout}.`, summary: `Changed layout to ${layout}`, mutated: true };
     }
     case 'delete_slide': {
@@ -392,10 +394,15 @@ function buildSystem(ctx: Ctx): string {
 How to work:
 - Make the change with tools, then reply with ONE or TWO short sentences describing what you did. No markdown headings; keep it conversational.
 - Never invent numbers. Verify with run_sql before putting a figure on a slide. Charts must be filled via a chart element's sql.
-- Slides have a layout and regions. Moving something ("put the chart on the right") means update_element with a new region (or set_slide_layout). Free-form pixel positioning is not supported; if asked for it, explain and offer the closest option.
+- Slides have a layout and regions. Moving something ("put the chart on the right") means update_element with a new region (or set_slide_layout). Free-form pixel positioning is not supported.
+- Sides: "split" has a WIDE left column and a NARROW right one; "split-flipped" is the mirror (narrow left, wide right). To flip or mirror a slide while keeping each element's size, call set_slide_layout to the other split layout; contents swap sides automatically. To put the chart on the right at full width, use split-flipped. Putting the chart in the narrow column deliberately makes it smaller.
+- When you cannot do something, say so plainly in one sentence ("I can't do X because Y"), then offer at most ONE concrete alternative that you have actually verified is possible with your tools. Never offer an option that is identical to the current state, and never describe a layout option you are unsure about.
 - Charts: ${CHART_TYPES.join(', ')}. Use bar for category comparison, line/area for trends, pie only for <= 6 parts of a whole, scatter for two numeric columns.
 - Bar/pie charts draw exactly one bar/slice per query row, labelled by xKey. So: xKey must be a short, human-readable text label column (never an id or raw timestamp); GROUP BY it so each category appears exactly once; keep 3-12 categories (ORDER BY value DESC LIMIT 10); COALESCE NULL labels to 'Unknown'; make every yKey a numeric column; alias columns readably, and make xKey/yKeys match the result column names exactly. Pivot multiple series into columns (CASE WHEN), never long format.
 - Keep slides minimal: one chart, 2-4 short bullets, up to 2-3 big stats.
+- Give the user the form they asked for: "a list of X" is a bullets element (or a table-like list in text), not a chart; "a chart of X" is a chart. Put real values from run_sql in the bullets (e.g. "Taxi Driver (1976), 8.3").
+- Insert position: "after slide N" means add_slide with position N+1. Slide numbers update automatically, so never renumber anything or mention renumbering.
+- Do the work in as few steps as possible: once the numbers are verified, make the change immediately rather than narrating. Never end a reply by saying what you will do next; either do it with a tool call or report that it is done.
 - Slide ids and element ids are shown below. Slide numbers are 1-based in conversation.
 - If a request is ambiguous in a way that matters, ask one brief question instead of guessing.
 - If the user asks for more findings, call suggest_findings and present the results as a short numbered list (use the numbers returned). Add slides only for the ones they choose, with add_finding_slide(number); it reuses the verified chart data exactly, so never re-type that SQL yourself.
@@ -404,6 +411,12 @@ CURRENT DECK:
 ${summarizeDeck(ctx.deck)}
 
 ${dataPart}`;
+}
+
+/** True when the model's reply sounds like it is about to act ("Let me add it", "Now I'll insert...") but made no call. */
+function announcesAction(text: string): boolean {
+  const tail = text.trim().slice(-240);
+  return /\b(let me|i'll|i will|now i|i'm going to|going to|next,? i)\b/i.test(tail) || /:\s*$/.test(tail);
 }
 
 /** Providers require alternating roles starting with "user"; merge consecutive turns and drop leading assistant ones. */
@@ -435,21 +448,46 @@ export async function runAgent(opts: {
     (t) => ctx.session || !['run_sql', 'suggest_findings', 'add_finding_slide'].includes(t.name),
   );
 
-  for (let turn = 0; turn < 10; turn++) {
-    const { text, toolCalls } = await provider.chat({
+  const MAX_TURNS = 12;
+  let nudges = 0;
+  let acted = false; // did any tool succeed and change the deck during this request?
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    const { text, toolCalls, truncated } = await provider.chat({
       system: buildSystem(ctx),
       tools: toolList,
       messages: msgs,
-      maxTokens: 4096,
+      maxTokens: 8192,
       onText: (delta) => ctx.emit({ type: 'text', delta }),
     });
-    msgs.push({ role: 'assistant', content: text, toolCalls });
-    if (!toolCalls.length) break;
+    if (text || toolCalls.length) msgs.push({ role: 'assistant', content: text, toolCalls });
+    if (!toolCalls.length) {
+      // Weaker models often announce an action ("Let me add it.") and then stop, or get cut off mid-call.
+      // Push once or twice instead of leaving the user with a promise and no change.
+      if (nudges < 2 && (truncated || (!acted && announcesAction(text)))) {
+        nudges++;
+        msgs.push({
+          role: 'user',
+          content:
+            'You stopped before making the change. Call the tool now to actually do it. Keep tool arguments short, and do not repeat earlier analysis.',
+        });
+        continue;
+      }
+      break;
+    }
 
     const results: { id: string; content: string; isError?: boolean }[] = [];
     for (const call of toolCalls) {
       try {
-        const out = await execute(ctx, call.name as ToolName, call.input);
+        if (call.argsError) throw new Error(`${call.argsError} Retry with shorter arguments.`);
+        const def = toolList.find((t) => t.name === call.name);
+        if (!def) throw new Error(`Unknown tool "${call.name}".`);
+        const parsed = def.schema.safeParse(call.input);
+        if (!parsed.success) {
+          const issues = parsed.error.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ');
+          throw new Error(`Invalid arguments (${issues}). Fix them and call the tool again.`);
+        }
+        const out = await execute(ctx, call.name as ToolName, parsed.data);
+        if (out.mutated) acted = true;
         ctx.emit({ type: 'tool', name: call.name, summary: out.summary });
         if (out.mutated) ctx.emit({ type: 'deck', deck: structuredClone(ctx.deck) });
         if (call.name === 'suggest_findings') ctx.emit({ type: 'findings', findings: ctx.suggested });
