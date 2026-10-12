@@ -1,14 +1,14 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore, type Step } from './store';
 import { AgentPanel } from './components/AgentPanel';
 import { UploadStep } from './components/UploadStep';
-import { InsightsStep } from './components/InsightsStep';
+import { FindingsStep } from './components/FindingsStep';
 import { StyleStep } from './components/StyleStep';
 import { EditStep } from './components/EditStep';
 
 const STEPS: { id: Step; label: string }[] = [
   { id: 'upload', label: 'Upload' },
-  { id: 'insights', label: 'Insights' },
+  { id: 'findings', label: 'Findings' },
   { id: 'style', label: 'Style' },
   { id: 'edit', label: 'Refine & export' },
 ];
@@ -35,7 +35,9 @@ function Stepper({ step }: { step: Step }) {
 }
 
 export function App() {
-  const { step, init, error, health, reset } = useStore();
+  const { step, init, error, health, reset, profile, sessionId } = useStore();
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const warnings = profile?.warnings ?? [];
 
   useEffect(() => {
     void init();
@@ -58,6 +60,20 @@ export function App() {
           <code>GEMINI_API_KEY</code>), and restart <code>npm run dev</code>.
         </div>
       )}
+      {warnings.length > 0 && dismissedFor !== sessionId && (
+        <div className="flex shrink-0 items-start justify-between bg-amber-50 px-6 py-2.5 text-sm text-amber-900 ring-1 ring-amber-200">
+          <div>
+            {warnings.map((w, i) => (
+              <div key={i}>
+                <strong>Heads up:</strong> {w}
+              </div>
+            ))}
+          </div>
+          <button onClick={() => setDismissedFor(sessionId)} className="ml-4 shrink-0 font-semibold hover:underline">
+            Dismiss
+          </button>
+        </div>
+      )}
       {error && (
         <div className="flex shrink-0 items-center justify-between bg-red-50 px-6 py-2.5 text-sm text-red-800 ring-1 ring-red-200">
           <span>{error}</span>
@@ -70,7 +86,7 @@ export function App() {
       <div className="flex min-h-0 flex-1">
         <main className="scroll-thin min-w-0 flex-1 overflow-y-auto">
           {step === 'upload' && <UploadStep />}
-          {step === 'insights' && <InsightsStep />}
+          {step === 'findings' && <FindingsStep />}
           {step === 'style' && <StyleStep />}
           {step === 'building' && (
             <div className="flex h-full flex-col items-center justify-center gap-4 text-center">

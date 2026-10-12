@@ -1,93 +1,39 @@
 # Smart Slides
 
-Upload a CSV, let an AI agent find the trends worth presenting, then build and refine a slide deck by chatting with it. Export to PowerPoint.
+## High-Level Summary
+The project I chose to build is a small proof-of-concept app where users work with an agent that extracts key findings from a dataset, then builds a presentation deck based on those findings. The agent acts as the brains behind the initial analysis, but the user has control every step of the way. They can prompt the agent to generate more findings or regenerate them from a different angle, view and reuse the SQL queries the agent generated, choose the presentation theme, and prompt the agent to add, remove, or redesign slides in the presentation.
 
-> Proof of concept. No auth, no database, single-user.
+The overall goal is to streamline the process of building a presentation that highlights the key trends and actionable findings within a dataset. Users can then focus on shaping the story they want to tell with their data instead of spending time querying it and hand-building a deck.
 
-## Quick start
+I chose this idea because building presentations has always been a pain point for me, in both academic and corporate settings. Even if someone comes in with an understanding of the data, creating visualizations, arranging them in a slideshow, and writing explainer and body text can take hours away from other tasks. I wanted to design something that empowers users by delegating 90% of the presentation creation process to the LLM, while the 10% of refining and adding details stays fully in the user's control.
 
-**Requirements:** Node.js 20+ (tested on 24) and an LLM API key. The default is a free [Gemini API key](https://aistudio.google.com/apikey); Anthropic and any OpenAI-compatible endpoint (OpenRouter, Groq, Ollama) also work.
+## Feature Overview
+- Supports uploading one or more CSV files to analyze
+- If multiple files are uploaded, the LLM's prompt includes directions to look for findings that span tables via joins, not just within each file
+- CSV files are parsed into an in-memory SQLite database
+- The LLM generates SQL queries to run against the uploaded data, reducing hallucination by grounding every figure in a real query
+- SQL queries generate findings: trends, key points, and other observations about the data
+- Users can view the initial findings, prompt the LLM to generate more or regenerate them, or chat to request findings on a specific topic
+- Generated SQL queries can be viewed and copied for reuse
+- Users pick between six built-in themes for the presentation
+- The LLM auto-generates slides, defaulting to one per finding with an appropriate visualization on each slide
+- Users can interactively shape the presentation by prompting the LLM to add, remove, or edit any details on the slides, with undo and redo for each prompt
+- The LLM has access to a text-based layout summary of each slide so it can understand directional prompts, such as "move this text to the left"
+- Decks are saved in the browser and exported to PowerPoint (.pptx)
+- Bring-your-own-model support for Gemini, NanoGPT, Anthropic, and any OpenAI-compatible endpoint (including OpenAI), configured via `.env`
 
-```bash
-npm install
-cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
-# edit .env and set GEMINI_API_KEY=...
-npm run dev
-```
+## How AI was used to build the solution
+I used Claude Sonnet 5.5 extensively for initial code generation and feature additions, along with some exploratory questions on design decisions like which CSV parsing library to use and how to keep user-provided API keys secure on the server side. My initial prompt was essentially a bare-bones requirement doc for the application I wanted to build. I came in with the idea for a presentation generation tool, along with the stack I wanted to build it on and some reference websites for the visual style. As I tested the application, I naturally ran into a few parts of the experience that felt lacking, so I went back and prompted Claude to iteratively add new features.
 
-Open **http://localhost:5173**. The backend runs on port 8787 (Vite proxies `/api` to it).
+There were some implementation decisions Claude made along the way that I didn't understand or agree with. For example, it initially had the in-app agent pick the theme itself, rather than recommending one and leaving the final choice to the user. I also found the prompts it initially generated for finding and slide generation lacking. The former had no instructions against duplicate findings, and the latter produced a first-slide title that was either irrelevant or over-focused on a single slide's contents instead of summarizing the whole presentation. In these cases, I prompted Claude with an explanation of why its initial choice was lacking, then had it draft a fix.
 
-Two sample datasets are built into the UI, in `web/public/sample/` (regenerate with `npm run sample`). Both have planted trends so you can check the agent finds them:
-- `social_posts.csv` (single table): e.g. Brazil's "angry" share jumps in 2024.
-- `customers.csv` + `products.csv` + `orders.csv` (multi-table): e.g. Enterprise customers buy far more Hardware, and big discounts lift Accessories quantity. These need joins across files.
+AI is also integrated into the application itself; calls to an LLM drive the data findings as well as the slide creation. To keep cost down, I used DeepSeek V4 Flash 0731 via NanoGPT for my testing. I ran into some limitations in response latency and the depth of findings generated by this model. Access to a larger and newer model may improve the intelligence of the findings generated in the application.
 
-### Other scripts
-
-| Command             | What it does                          |
-| ------------------- | ------------------------------------- |
-| `npm run dev`       | Backend + frontend with hot reload    |
-| `npm run typecheck` | Type-checks all workspaces            |
-| `npm run build`     | Production build of the frontend      |
-
-### Configuration (`.env`)
-
-| Variable            | Default                | Notes                                                    |
-| ------------------- | ---------------------- | -------------------------------------------------------- |
-| `LLM_PROVIDER`      | `gemini`               | `gemini`, `nanogpt`, `anthropic`, or `openai-compatible`            |
-| `GEMINI_API_KEY`    |                        | Free key from Google AI Studio                           |
-| `GEMINI_MODEL`      | `gemini-3.8-flash`     | Any Gemini model id                                      |
-| `NANOGPT_API_KEY` / `NANOGPT_MODEL` |        | For `LLM_PROVIDER=nanogpt` (subscription endpoint); `npm run models` lists ids |
-| `ANTHROPIC_API_KEY` |                        | Used when `LLM_PROVIDER=anthropic`                       |
-| `ANTHROPIC_MODEL`   | `claude-sonnet-5-5`    |                                                          |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` |       | For `openai-compatible` (OpenRouter, Groq, Ollama, ...)  |
-| `PORT`              | `8787`                 | Backend port                                             |
-
-Only the backend reads these. Free tiers are rate-limited and smaller models are less reliable at structured tool calls, so
-if insight generation or edits occasionally fail, retry or switch to a stronger model.
-
-## How it works
-
-```
-Browser (React + TS)  ──NDJSON streams──▶  Node/Express  ──▶  Gemini / Anthropic / OpenAI-compatible
- wizard · chat · slides                    in-memory session
- undo · IndexedDB save                     sql.js (SQLite/WASM) holds the CSV
- PPTX export (pptxgenjs)
-```
-
-1. **Upload.** One or more CSVs are parsed with PapaParse, types are inferred (number / date / text), and each file becomes a table in an in-memory SQLite database (table name = file name). Join keys between files are auto-detected (matching `*_id`-style columns whose values overlap by 80%+). A compact *profile* (columns, ranges, top values, sample rows, relationships) is built.
-2. **Insights.** The model never sees raw rows. It (a) proposes hypotheses with SQL from the profile, (b) the server runs every query, (c) the model writes up only the findings the real result rows support. Numbers on slides therefore come from queries, not from the model's memory.
-3. **Style.** Six curated presets; the agent recommends one.
-4. **Scaffold.** An intro slide, one slide per chosen insight (chart + key points + big numbers), and a summary slide.
-5. **Refine.** Chat edits go through tool calls on a JSON deck model (add/update/move/remove elements, change layout/theme, reorder slides, re-query charts, suggest new insights). One prompt = one undo step.
-6. **Save / export.** Decks (plus the source CSV) are saved to IndexedDB in the browser. Export produces a `.pptx` with **native, editable PowerPoint charts**.
-
-### Layout model
-Slides use three layouts (`title`, `split`, `full`) with named regions (`header`, `left`, `right`, `main`, `footer`). "Move the chart to the right" changes an element's region. Free-form pixel positioning is intentionally not supported. The same geometry code (`shared/src/layout.ts`) drives both the web renderer and the PPTX export, so they match.
-
-### API key handling
-- The key lives only in the server's environment (`.env`, git-ignored). It is never sent to or bundled into the browser, and never logged.
-- The browser only talks to `/api/*` on the local backend.
-- Note that data aggregates and a few sample rows are sent to the configured LLM provider as part of analysis (free tiers may log or train on prompts, so use non-sensitive data).
-
-## Project layout
-
-```
-shared/   types, themes, layout geometry (used by web + server)
-server/   Express API: CSV → SQLite, insight pipeline, scaffold, chat agent
-web/      Vite + React + Tailwind UI, slide renderer, PPTX export
-scripts/  sample data generator
-```
-
-## Known limitations (POC)
-- CSV only: up to 8 files, ~200k rows per file (500k total). Join keys are guessed from column names and value overlap, so unusual keys may not be detected.
-- Chart types: bar, stacked bar, line, area, pie, scatter (the subset that exists both in the browser and as native PPTX charts).
-- Fonts are limited to common ones (Arial, Calibri, Georgia, Verdana, Trebuchet MS) so PPTX matches the web view.
-- Sessions live in server memory; restarting the server drops them. Reopening a saved deck re-uploads its stored CSV automatically.
-- No direct editing; changes are made by conversing with the agent (by design).
-
-## TODO / follow-ups
-- **Demo mode**: bundled sample data plus a mocked LLM so reviewers can run the full flow with no API key.
-- More file formats (xlsx, json, parquet).
-- Optional UI key entry for non-local deployments.
-- PDF export; speaker notes.
-- Automated tests for the profiler, SQL guard, and layout geometry.
+## What would I do if I had more time?
+- **More robust visualizations:** the charts built into the slides today are fairly basic.
+- **A better model for finding and slide generation:** one core thing still lacking is consistent finding quality. Even after improving the prompt, I still sometimes get duplicate or useless findings in the suggested set. Testing with a more capable model would show whether the prompt still needs work or whether I'm hitting a wall with what DeepSeek V4 Flash 0731 can do.
+- **A full drag-and-drop editor (with image upload):** this would give the user more power to make changes directly, in parallel with the agent working on the changes they prompted.
+- **Transitions and a "present" mode:** preview the presentation without leaving the application.
+- **Expanded file type support:** right now the application only supports CSV for data import and .pptx for presentation export.
+- **Database sources in addition to CSV upload:** I skipped this for the POC to avoid the overhead of setting up a database just to test the app, but it would be essential for real users in a production environment.
+- **Automated tests** for the profiler, SQL guard, and layout geometry.

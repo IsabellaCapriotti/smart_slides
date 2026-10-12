@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import express, { type Response } from 'express';
 import cors from 'cors';
 import { z } from 'zod';
-import type { ChatMessage, Deck, Insight, StreamEvent } from '@smart-slides/shared';
+import type { ChatMessage, Deck, Finding, StreamEvent } from '@smart-slides/shared';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(here, '../../.env') });
@@ -12,9 +12,10 @@ dotenv.config({ path: path.resolve(here, '../../.env') });
 // Imported after dotenv so modules that read env at load time see the values.
 const { loadDatasets } = await import('./data');
 const { createSession, getSession } = await import('./sessions');
-const { generateInsights } = await import('./insights');
+const { generateFindings } = await import('./findings');
 const { scaffoldDeck, recommendStyle } = await import('./scaffold');
 const { runAgent } = await import('./agent');
+const { runFindingsAgent, MAX_FINDINGS, MORE_BATCH } = await import('./findingsAgent');
 const { hasApiKey, describeProvider } = await import('./llm');
 
 const app = express();
@@ -80,42 +81,50 @@ app.post('/api/session', async (req, res) => {
   }
 });
 
-const MAX_INSIGHTS = 30;
-const MORE_BATCH = 6;
-
-app.post('/api/insights', async (req, res) => {
+app.post('/api/findings', async (req, res) => {
   const session = getSession(req.body?.sessionId);
   const more = req.body?.more === true;
   await streamed(res, async (emit) => {
     if (!session) throw new Error('Session expired. Please re-upload your file.');
     const progress = (message: string) => emit({ type: 'progress', message });
     if (!more) {
-      session.insights = await generateInsights(session, { onProgress: progress });
+      session.findings = await generateFindings(session, { onProgress: progress });
     } else {
-      const room = MAX_INSIGHTS - session.insights.length;
-      if (room <= 0) throw new Error(`You already have the maximum of ${MAX_INSIGHTS} insights.`);
-      const fresh = await generateInsights(session, {
+      const room = MAX_FINDINGS - session.findings.length;
+      if (room <= 0) throw new Error(`You already have the maximum of ${MAX_FINDINGS} findings.`);
+      const fresh = await generateFindings(session, {
         onProgress: progress,
         count: Math.min(MORE_BATCH, room),
-        existing: session.insights.map((i) => i.headline),
+        existing: session.findings,
       });
       if (!fresh.length) {
-        throw new Error('No new distinct insights were found this time. Try again in a moment.');
+        throw new Error('No new distinct findings were found this time. Try again in a moment.');
       }
-      session.insights = [...session.insights, ...fresh.slice(0, room)];
+      session.findings = [...session.findings, ...fresh.slice(0, room)];
     }
-    emit({ type: 'insights', insights: session.insights });
+    emit({ type: 'findings', findings: session.findings });
   });
 });
 
-const StyleBody = z.object({ sessionId: z.string(), insightIds: z.array(z.string()).min(1) });
+app.post('/api/findings/chat', async (req, res) => {
+  const session = getSession(req.body?.sessionId);
+  const message = String(req.body?.message ?? '');
+  const history = (Array.isArray(req.body?.history) ? req.body.history : []) as ChatMessage[];
+  const selectedCount = Number(req.body?.selectedCount) || 0;
+  await streamed(res, async (emit) => {
+    if (!session) throw new Error('Session expired. Please re-upload your file.');
+    await runFindingsAgent({ session, selectedCount, message, history, emit });
+  });
+});
+
+const StyleBody =z.object({ sessionId: z.string(), findingIds: z.array(z.string()).min(1) });
 
 app.post('/api/style', async (req, res) => {
   const body = StyleBody.safeParse(req.body);
   const session = getSession(req.body?.sessionId);
   await streamed(res, async (emit) => {
     if (!body.success || !session) throw new Error('Session expired. Please re-upload your file.');
-    const chosen = session.insights.filter((i) => body.data.insightIds.includes(i.id));
+    const chosen = session.findings.filter((i) => body.data.findingIds.includes(i.id));
     const rec = await recommendStyle(session, chosen);
     emit({ type: 'style', themeId: rec.themeId, message: rec.message });
   });
@@ -123,7 +132,7 @@ app.post('/api/style', async (req, res) => {
 
 const ScaffoldBody = z.object({
   sessionId: z.string(),
-  insightIds: z.array(z.string()).min(1),
+  findingIds: z.array(z.string()).min(1),
   themeId: z.string(),
 });
 
@@ -132,10 +141,10 @@ app.post('/api/scaffold', async (req, res) => {
   const session = getSession(req.body?.sessionId);
   await streamed(res, async (emit) => {
     if (!body.success || !session) throw new Error('Session expired. Please re-upload your file.');
-    const chosen = body.data.insightIds
-      .map((id) => session.insights.find((i) => i.id === id))
-      .filter((i): i is Insight => Boolean(i));
-    if (!chosen.length) throw new Error('None of the selected insights were found. Please regenerate insights.');
+    const chosen = body.data.findingIds
+      .map((id) => session.findings.find((i) => i.id === id))
+      .filter((i): i is Finding => Boolean(i));
+    if (!chosen.length) throw new Error('None of the selected findings were found. Please regenerate findings.');
     emit({ type: 'progress', message: 'Designing your slides…' });
     const deck = await scaffoldDeck(session, chosen, body.data.themeId);
     emit({ type: 'deck', deck });

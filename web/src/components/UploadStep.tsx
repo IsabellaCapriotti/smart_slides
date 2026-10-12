@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useStore } from '../store';
 
 export function UploadStep() {
-  const { uploadFiles, loadSample, busy, progress, saved, openSaved, deleteSaved, health } = useStore();
+  const { uploadFiles, busy, progress, saved, openSaved, deleteSaved } = useStore();
   const [drag, setDrag] = useState(false);
   const input = useRef<HTMLInputElement>(null);
 
@@ -20,7 +20,7 @@ export function UploadStep() {
   return (
     <div className="mx-auto flex max-w-3xl flex-col items-center px-6 py-14 text-center">
       <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-brand shadow-sm ring-1 ring-line">
-        Data → insights → slides
+        Data → findings → slides
       </span>
       <h1 className="mt-5 text-5xl font-extrabold leading-[1.08] tracking-tight">
         Turn a spreadsheet into a <span className="brand-text">story worth presenting</span>
@@ -63,25 +63,6 @@ export function UploadStep() {
           </>
         )}
       </div>
-
-      {!busy && (
-        <div className="mt-5 flex flex-col items-center gap-1.5 sm:flex-row sm:gap-5">
-          <button
-            onClick={() => void loadSample('single')}
-            disabled={health ? !health.hasApiKey : false}
-            className="text-sm font-semibold text-brand hover:underline disabled:opacity-50"
-          >
-            Try sample: social posts →
-          </button>
-          <button
-            onClick={() => void loadSample('multi')}
-            disabled={health ? !health.hasApiKey : false}
-            className="text-sm font-semibold text-brand hover:underline disabled:opacity-50"
-          >
-            Try sample: customers + products + orders →
-          </button>
-        </div>
-      )}
 
       {saved.length > 0 && !busy && (
         <div className="mt-14 w-full text-left">

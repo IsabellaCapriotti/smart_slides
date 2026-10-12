@@ -8,6 +8,13 @@ const SUGGESTIONS = [
   'Switch to the Aurora theme',
 ];
 
+const FINDING_SUGGESTIONS = [
+  'Find more findings',
+  'Look for differences between segments',
+  'Anything surprising over time?',
+  'Regenerate with a focus on outliers',
+];
+
 function renderInline(text: string) {
   // Minimal **bold** support for agent messages.
   return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
@@ -19,7 +26,11 @@ export function AgentPanel() {
   const { messages, busy, progress, step, sendChat } = useStore();
   const [text, setText] = useState('');
   const endRef = useRef<HTMLDivElement>(null);
-  const canChat = step === 'edit';
+  const canChat = step === 'edit' || step === 'findings';
+  const suggestions = step === 'findings' ? FINDING_SUGGESTIONS : SUGGESTIONS;
+  // On the findings step the setup messages are already in the thread, so key off the user's own messages.
+  const showSuggestions =
+    canChat && (step === 'findings' ? !messages.some((m) => m.role === 'user') : messages.length <= 1);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -42,7 +53,7 @@ export function AgentPanel() {
         </div>
         <div>
           <div className="text-sm font-semibold">Slide agent</div>
-          <div className="text-xs text-ink-soft">{busy ? 'Working…' : canChat ? 'Ask me to change anything' : 'Guiding your setup'}</div>
+          <div className="text-xs text-ink-soft">{busy ? 'Working…' : step === 'findings' ? 'Ask for the findings you want' : canChat ? 'Ask me to change anything' : 'Guiding your setup'}</div>
         </div>
       </div>
 
@@ -87,9 +98,9 @@ export function AgentPanel() {
       </div>
 
       <div className="border-t border-line p-4">
-        {canChat && messages.length <= 1 && (
+        {showSuggestions && (
           <div className="mb-3 flex flex-wrap gap-1.5">
-            {SUGGESTIONS.map((s) => (
+            {suggestions.map((s) => (
               <button
                 key={s}
                 disabled={busy}
@@ -113,7 +124,7 @@ export function AgentPanel() {
                 submit();
               }
             }}
-            placeholder={canChat ? 'Describe a change…' : 'Complete the current step to start chatting'}
+            placeholder={canChat ? (step === 'findings' ? 'Ask for a kind of finding, or “generate more”…' : 'Describe a change…') : 'Complete the current step to start chatting'}
             className="max-h-32 min-h-[28px] flex-1 resize-none bg-transparent py-1 text-sm outline-none placeholder:text-ink-soft/70"
           />
           <button

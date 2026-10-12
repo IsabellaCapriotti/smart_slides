@@ -4,13 +4,13 @@ import {
   type ChatMessage,
   type DataProfile,
   type Deck,
-  type Insight,
+  type Finding,
   type UploadedFile,
 } from '@smart-slides/shared';
 import * as api from './api';
 import { listSaved, removeSaved, saveDeck, type SavedDeck } from './persist';
 
-export type Step = 'upload' | 'insights' | 'style' | 'building' | 'edit';
+export type Step = 'upload' | 'findings' | 'style' | 'building' | 'edit';
 
 export interface UiMessage {
   id: number;
@@ -32,7 +32,7 @@ interface State {
   sessionId: string | null;
   profile: DataProfile | null;
 
-  insights: Insight[];
+  findings: Finding[];
   selectedIds: string[];
   themeId: string;
   recommendedThemeId: string | null;
@@ -48,9 +48,8 @@ interface State {
 
   init(): Promise<void>;
   uploadFiles(files: UploadedFile[]): Promise<void>;
-  loadSample(kind?: 'single' | 'multi'): Promise<void>;
-  generateInsights(more?: boolean): Promise<void>;
-  toggleInsight(id: string): void;
+  generateFindings(more?: boolean): Promise<void>;
+  toggleFinding(id: string): void;
   continueToStyle(): Promise<void>;
   setTheme(id: string): void;
   buildDeck(): Promise<void>;
@@ -75,7 +74,7 @@ const initial = {
   files: [] as UploadedFile[],
   sessionId: null,
   profile: null,
-  insights: [] as Insight[],
+  findings: [] as Finding[],
   selectedIds: [] as string[],
   themeId: DEFAULT_THEME_ID,
   recommendedThemeId: null,
@@ -123,7 +122,7 @@ export const useStore = create<State>((set, get) => {
       set({ busy: true, error: null, progress: files.length > 1 ? 'Reading your files…' : 'Reading your file…' });
       try {
         const { sessionId, profile } = await api.createSession(files);
-        set({ files, sessionId, profile, step: 'insights', insights: [], selectedIds: [], messages: [] });
+        set({ files, sessionId, profile, step: 'findings', findings: [], selectedIds: [], messages: [] });
         const tables = profile.tables.length;
         const links = profile.relationships.length;
         say(
@@ -137,36 +136,28 @@ export const useStore = create<State>((set, get) => {
                   : `I didn't find any shared keys between them, so I'll analyze them separately. `),
         );
         say('Give me a moment while I look for the trends worth presenting.');
-        await get().generateInsights();
+        await get().generateFindings();
       } catch (e) {
         set({ error: errMsg(e), busy: false });
       }
     },
 
-    async loadSample(kind = 'single') {
-      const names = kind === 'multi' ? ['customers.csv', 'products.csv', 'orders.csv'] : ['social_posts.csv'];
-      const files = await Promise.all(
-        names.map(async (name) => ({ name, csv: await (await fetch(`/sample/${name}`)).text() })),
-      );
-      await get().uploadFiles(files);
-    },
-
-    async generateInsights(more = false) {
+    async generateFindings(more = false) {
       const { sessionId } = get();
       set({ busy: true, error: null, progress: more ? 'Looking for more…' : 'Analyzing…' });
       try {
-        await run('/api/insights', { sessionId, more }, (e) => {
-          if (e.type === 'insights') {
-            const before = get().insights.length;
+        await run('/api/findings', { sessionId, more }, (e) => {
+          if (e.type === 'findings') {
+            const before = get().findings.length;
             set((s) => ({
-              insights: e.insights,
+              findings: e.findings,
               // Keep the user's selections when adding more; reset them on a full regenerate.
-              selectedIds: more ? s.selectedIds.filter((id) => e.insights.some((i) => i.id === id)) : [],
+              selectedIds: more ? s.selectedIds.filter((id) => e.findings.some((i) => i.id === id)) : [],
             }));
             say(
               more
-                ? `Added ${e.insights.length - before} more insight${e.insights.length - before === 1 ? '' : 's'} (${e.insights.length} total). Your earlier selections are kept.`
-                : `I found ${e.insights.length} findings that stand out. Each one is backed by a query against your data. ` +
+                ? `Added ${e.findings.length - before} more finding${e.findings.length - before === 1 ? '' : 's'} (${e.findings.length} total). Your earlier selections are kept.`
+                : `I found ${e.findings.length} findings that stand out. Each one is backed by a query against your data. ` +
                     `Pick the ones you want to build slides around.`,
             );
           }
@@ -178,7 +169,7 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
-    toggleInsight(id) {
+    toggleFinding(id) {
       set((s) => ({
         selectedIds: s.selectedIds.includes(id) ? s.selectedIds.filter((x) => x !== id) : [...s.selectedIds, id],
       }));
@@ -187,9 +178,9 @@ export const useStore = create<State>((set, get) => {
     async continueToStyle() {
       const { sessionId, selectedIds } = get();
       set({ busy: true, error: null, step: 'style', progress: 'Thinking about style…', recommendedThemeId: null });
-      say(`Great, ${selectedIds.length} insight${selectedIds.length === 1 ? '' : 's'} selected. Now let's choose a look.`);
+      say(`Great, ${selectedIds.length} finding${selectedIds.length === 1 ? '' : 's'} selected. Now let's choose a look.`);
       try {
-        await run('/api/style', { sessionId, insightIds: selectedIds }, (e) => {
+        await run('/api/style', { sessionId, findingIds: selectedIds }, (e) => {
           if (e.type === 'style') {
             set({ recommendedThemeId: e.themeId, themeId: e.themeId });
             say(e.message);
@@ -212,7 +203,7 @@ export const useStore = create<State>((set, get) => {
       const { sessionId, selectedIds, themeId } = get();
       set({ busy: true, error: null, step: 'building', progress: 'Designing your slides…' });
       try {
-        await run('/api/scaffold', { sessionId, insightIds: selectedIds, themeId }, (e) => {
+        await run('/api/scaffold', { sessionId, findingIds: selectedIds, themeId }, (e) => {
           if (e.type === 'deck') {
             set({ deck: e.deck, past: [], future: [], activeSlideId: e.deck.slides[0]?.id ?? null, step: 'edit' });
             say(
@@ -230,8 +221,10 @@ export const useStore = create<State>((set, get) => {
     },
 
     async sendChat(text) {
-      const { deck, sessionId, messages } = get();
-      if (!deck || !text.trim()) return;
+      const { deck, sessionId, messages, step, selectedIds } = get();
+      // On the findings step the same chat box steers finding generation instead of editing a deck.
+      const onFindings = step === 'findings';
+      if (!text.trim() || (onFindings ? !sessionId : !deck)) return;
       const history: ChatMessage[] = messages
         .filter((m) => !m.error)
         .map((m) => ({ role: m.role, content: m.content }));
@@ -249,9 +242,19 @@ export const useStore = create<State>((set, get) => {
         set((s) => ({ messages: s.messages.map((m) => (m.id === replyId ? fn(m) : m)) }));
       let changed = false;
       try {
-        await run('/api/chat', { sessionId, deck, message: text, history }, (e) => {
+        const [path, body] = onFindings
+          ? ['/api/findings/chat', { sessionId, message: text, history, selectedCount: selectedIds.length }]
+          : ['/api/chat', { sessionId, deck, message: text, history }];
+        await run(path, body, (e) => {
           if (e.type === 'text') patch((m) => ({ ...m, content: m.content + e.delta }));
           if (e.type === 'tool') patch((m) => ({ ...m, actions: [...(m.actions ?? []), e.summary] }));
+          if (onFindings && e.type === 'findings') {
+            set((s) => ({
+              findings: e.findings,
+              // Added findings keep the user's picks; a full regenerate starts clean.
+              selectedIds: e.replaced ? [] : s.selectedIds.filter((id) => e.findings.some((f) => f.id === id)),
+            }));
+          }
           if (e.type === 'deck') {
             const isFirstChange = !changed;
             changed = true;

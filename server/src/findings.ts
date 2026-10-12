@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { CHART_TYPES, type ChartType, type Insight, type Row } from '@smart-slides/shared';
+import { CHART_TYPES, type ChartType, type Finding, type Row } from '@smart-slides/shared';
 import { callTool } from './llm';
 import { cleanChartRows } from './chartData';
+import { dropDuplicates } from './dedupe';
 import { profileForPrompt, runSql } from './data';
 import type { Session } from './sessions';
 
@@ -23,9 +24,9 @@ const HypothesesSchema = z.object({
 });
 
 const FinalSchema = z.object({
-  insights: z.array(
+  findings: z.array(
     z.object({
-      id: z.string().describe('The hypothesis id this insight is based on'),
+      id: z.string().describe('The hypothesis id this finding is based on'),
       headline: z.string().describe('A specific, number-backed claim, max ~15 words'),
       narrative: z.string().describe('1-2 sentences explaining why it matters; mention caveats if the sample is small'),
       keyFigures: z
@@ -59,15 +60,18 @@ const CHART_RULES = `Chart-ready SQL rules:
   * Alias columns with clean, readable names (e.g. AS region, AS revenue); xKey and yKeys must match the result column names exactly.
   * Order bars meaningfully: by value descending, or by natural order (weekday, age band, year).`;
 
-export async function generateInsights(
+export async function generateFindings(
   session: Session,
-  opts: { focus?: string; existing?: string[]; count?: number; onProgress?: (m: string) => void } = {},
-): Promise<Insight[]> {
+  opts: { focus?: string; existing?: Finding[]; count?: number; onProgress?: (m: string) => void } = {},
+): Promise<Finding[]> {
   const { db, profile } = session.dataset;
   const progress = opts.onProgress ?? (() => {});
   const want = opts.count ?? 8;
-  const existing = opts.existing?.length ? `\nAlready covered (do NOT repeat):\n- ${opts.existing.join('\n- ')}` : '';
-  const focus = opts.focus ? `\nThe user specifically wants insights about: ${opts.focus}` : '';
+  const existingList = opts.existing ?? [];
+  const existing = existingList.length
+    ? `\nAlready covered (do NOT repeat, restate, or slightly reword these):\n- ${existingList.map((i) => i.headline).join('\n- ')}`
+    : '';
+  const focus = opts.focus ? `\nThe user specifically wants findings about: ${opts.focus}` : '';
 
   progress('Studying your data and proposing hypotheses…');
   const { hypotheses } = await callTool<z.infer<typeof HypothesesSchema>>({
@@ -86,7 +90,7 @@ export async function generateInsights(
         : ''),
     tool: {
       name: 'propose_hypotheses',
-      description: 'Submit candidate insights with the SQL that tests each one.',
+      description: 'Submit candidate findings with the SQL that tests each one.',
       schema: HypothesesSchema,
     },
     maxTokens: 6000,
@@ -116,22 +120,24 @@ export async function generateInsights(
 
   const final = await callTool<z.infer<typeof FinalSchema>>({
     system:
-      'You are a senior data analyst. You are given query results for candidate insights. ' +
+      'You are a senior data analyst. You are given query results for candidate findings. ' +
       'Keep only those where the data clearly supports a notable, presentable finding. Drop weak, flat, or noisy ones. ' +
       'Every number you cite MUST appear in or be directly computable from the rows shown. Never invent figures. ' +
       'Prefer findings that are specific (who/what/when/how much).',
-    user: `${evidence}\n\nSelect up to ${want} insights, ranked by significance.${focus}`,
+    user:
+      `${evidence}${existing}\n\nSelect up to ${want} findings, ranked by significance. ` +
+      `Each must make a distinct claim from the others and from anything already covered.${focus}`,
     tool: {
-      name: 'finalize_insights',
-      description: 'Submit the final, evidence-backed insights.',
+      name: 'finalize_findings',
+      description: 'Submit the final, evidence-backed findings.',
       schema: FinalSchema,
     },
     maxTokens: 5000,
   });
 
   const byId = new Map(results.map((r) => [r.h.id, r]));
-  const insights: Insight[] = [];
-  for (const f of final.insights) {
+  const findings: Finding[] = [];
+  for (const f of final.findings) {
     const src = byId.get(f.id);
     if (!src) continue;
     const cols = Object.keys(src.rows[0]);
@@ -144,7 +150,7 @@ export async function generateInsights(
     } catch {
       continue;
     }
-    insights.push({
+    findings.push({
       id: `${f.id}-${Math.random().toString(36).slice(2, 6)}`,
       headline: f.headline,
       narrative: f.narrative,
@@ -161,6 +167,7 @@ export async function generateInsights(
       },
     });
   }
-  insights.sort((a, b) => b.significance - a.significance);
-  return insights;
+  findings.sort((a, b) => b.significance - a.significance);
+  // Models often re-propose the same finding in different words, so filter in code, not just in the prompt.
+  return dropDuplicates(findings, existingList);
 }

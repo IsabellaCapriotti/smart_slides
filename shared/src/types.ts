@@ -82,7 +82,7 @@ export interface KeyFigure {
   label: string;
 }
 
-export interface Insight {
+export interface Finding {
   id: string;
   headline: string;
   narrative: string;
@@ -132,6 +132,8 @@ export interface DataProfile {
   rowCount: number;
   tables: TableProfile[];
   relationships: Relationship[];
+  /** Non-fatal notices to show the user, e.g. truncated uploads. */
+  warnings: string[];
 }
 
 export interface UploadedFile {
@@ -150,7 +152,8 @@ export type StreamEvent =
   | { type: 'text'; delta: string }
   | { type: 'tool'; name: string; summary: string }
   | { type: 'deck'; deck: Deck }
-  | { type: 'insights'; insights: Insight[] }
+  /** `replaced` means the list was regenerated from scratch (the client should clear its selection). */
+  | { type: 'findings'; findings: Finding[]; replaced?: boolean }
   | { type: 'style'; themeId: string; message: string }
   | { type: 'done' }
   | { type: 'error'; message: string };

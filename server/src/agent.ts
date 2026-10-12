@@ -11,7 +11,7 @@ import {
   type ChartElement,
   type ChatMessage,
   type Deck,
-  type Insight,
+  type Finding,
   type Slide,
   type SlideElement,
   type StreamEvent,
@@ -19,7 +19,7 @@ import {
 import { getProvider, type Msg, type ToolDef } from './llm';
 import { cleanChartRows } from './chartData';
 import { profileForPrompt, runSql } from './data';
-import { generateInsights } from './insights';
+import { generateFindings } from './findings';
 import type { Session } from './sessions';
 
 const Region = z.enum(REGIONS);
@@ -119,12 +119,23 @@ const tools = {
     description: 'Move a slide to a new 1-based position.',
     schema: z.object({ slideId: z.string(), position: z.number().int().min(1) }),
   },
-  suggest_insights: {
-    name: 'suggest_insights',
+  suggest_findings: {
+    name: 'suggest_findings',
     description:
-      'Generate NEW verified insights from the data (optionally around a focus). Returns headlines and chart specs; ' +
+      'Generate NEW verified findings from the data (optionally around a focus). Returns headlines and chart specs; ' +
       'it does not change the deck. Present them to the user and let them choose which to add.',
     schema: z.object({ focus: z.string().optional() }),
+  },
+  add_finding_slide: {
+    name: 'add_finding_slide',
+    description:
+      'Add a slide for one of the findings returned earlier by suggest_findings, by its number. The slide is built from ' +
+      'the verified chart data and key figures of the chosen finding, exactly as computed, so no SQL needs to be re-typed. ' +
+      'Prefer this over add_slide when the user picks a suggested finding.',
+    schema: z.object({
+      number: z.number().int().min(1),
+      position: z.number().int().optional().describe('1-based position to insert at; omit to append'),
+    }),
   },
 } satisfies Record<string, ToolDef>;
 
@@ -134,8 +145,8 @@ interface Ctx {
   session?: Session;
   deck: Deck;
   emit: (e: StreamEvent) => void;
-  /** Insights suggested during this conversation, so the user can say "add the 2nd one". */
-  suggested: Insight[];
+  /** Findings suggested by this session's agent (shared with the session, so numbers persist across turns). */
+  suggested: Finding[];
 }
 
 function findSlide(deck: Deck, id: string): Slide {
@@ -303,25 +314,71 @@ async function execute(ctx: Ctx, name: ToolName, raw: unknown): Promise<{ result
       deck.slides.splice(Math.min(position - 1, deck.slides.length), 0, slide);
       return { result: `Moved to position ${position}.`, summary: 'Reordered slides', mutated: true };
     }
-    case 'suggest_insights': {
+    case 'suggest_findings': {
       if (!ctx.session) throw new Error('No dataset is loaded in this session.');
-      const { focus } = input as Input<'suggest_insights'>;
-      const existing = [
-        ...ctx.session.insights.map((i) => i.headline),
-        ...ctx.suggested.map((i) => i.headline),
-      ];
-      const insights = await generateInsights(ctx.session, { focus, existing, count: 4 });
-      ctx.suggested.push(...insights);
-      const offset = ctx.suggested.length - insights.length;
-      // The slide-ready chart spec is included so add_slide can reuse it via sql.
-      const lines = insights.map((i, n) => ({
+      const { focus } = input as Input<'suggest_findings'>;
+      const existing = [...ctx.session.findings, ...ctx.suggested];
+      const findings = await generateFindings(ctx.session, { focus, existing, count: 4 });
+      if (!findings.length) {
+        return { result: 'No new distinct findings were found. Try a different focus.', summary: 'No new findings found', mutated: false };
+      }
+      // `suggested` lives on the session, so numbers stay valid in later turns.
+      const offset = ctx.suggested.length;
+      ctx.suggested.push(...findings);
+      const lines = findings.map((i, n) => ({
         number: offset + n + 1,
         headline: i.headline,
         narrative: i.narrative,
         keyFigures: i.keyFigures,
-        chart: { chartType: i.chart.chartType, xKey: i.chart.xKey, yKeys: i.chart.yKeys, sql: i.sql },
+        chartType: i.chart.chartType,
       }));
-      return { result: JSON.stringify(lines), summary: 'Generated new insights', mutated: false };
+      return {
+        result: `${JSON.stringify(lines)}
+To add one to the deck, call add_finding_slide with its number.`,
+        summary: 'Generated new findings',
+        mutated: false,
+      };
+    }
+    case 'add_finding_slide': {
+      const { number, position } = input as Input<'add_finding_slide'>;
+      const finding = ctx.suggested[number - 1];
+      if (!finding) {
+        throw new Error(
+          ctx.suggested.length
+            ? `No suggested finding #${number}. Valid numbers: 1-${ctx.suggested.length}.`
+            : 'No findings have been suggested yet. Call suggest_findings first.',
+        );
+      }
+      const source = `Source: ${ctx.session?.dataset.profile.fileName ?? 'uploaded data'}`;
+      const slide: Slide = {
+        id: uid(),
+        layout: 'split',
+        elements: [
+          { id: uid(), type: 'title', region: 'header', text: finding.headline },
+          {
+            id: uid(),
+            type: 'chart',
+            region: 'left',
+            chartType: finding.chart.chartType,
+            xKey: finding.chart.xKey,
+            yKeys: finding.chart.yKeys,
+            xLabel: finding.chart.xLabel,
+            yLabel: finding.chart.yLabel,
+            data: structuredClone(finding.chart.data),
+            sql: finding.sql, // the exact query that produced the data above
+          },
+          ...finding.keyFigures.slice(0, 2).map((k) => ({ id: uid(), type: 'stat' as const, region: 'right' as const, value: k.value, label: k.label })),
+          { id: uid(), type: 'bullets', region: 'right', items: [finding.narrative] },
+          { id: uid(), type: 'text', region: 'footer', text: source },
+        ],
+      };
+      const idx = position ? Math.min(Math.max(position - 1, 0), deck.slides.length) : deck.slides.length;
+      deck.slides.splice(idx, 0, slide);
+      return {
+        result: `Added slide id=${slide.id} at position ${idx + 1} for finding #${number}.`,
+        summary: 'Added a finding slide',
+        mutated: true,
+      };
     }
   }
 }
@@ -341,12 +398,25 @@ How to work:
 - Keep slides minimal: one chart, 2-4 short bullets, up to 2-3 big stats.
 - Slide ids and element ids are shown below. Slide numbers are 1-based in conversation.
 - If a request is ambiguous in a way that matters, ask one brief question instead of guessing.
-- If the user asks for more insights, call suggest_insights and present the results as a short numbered list; add slides only for the ones they choose (reuse the chart's sql/xKey/yKeys).
+- If the user asks for more findings, call suggest_findings and present the results as a short numbered list (use the numbers returned). Add slides only for the ones they choose, with add_finding_slide(number); it reuses the verified chart data exactly, so never re-type that SQL yourself.
 
 CURRENT DECK:
 ${summarizeDeck(ctx.deck)}
 
 ${dataPart}`;
+}
+
+/** Providers require alternating roles starting with "user"; merge consecutive turns and drop leading assistant ones. */
+export function toProviderMessages(history: ChatMessage[], message: string): Msg[] {
+  const msgs: Msg[] = [];
+  for (const m of [...history.slice(-16), { role: 'user' as const, content: message }]) {
+    if (!m.content.trim()) continue;
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === m.role) last.content = `${last.content}\n${m.content}`;
+    else msgs.push({ role: m.role, content: m.content });
+  }
+  while (msgs.length && msgs[0].role !== 'user') msgs.shift();
+  return msgs;
 }
 
 export async function runAgent(opts: {
@@ -357,21 +427,12 @@ export async function runAgent(opts: {
   emit: (e: StreamEvent) => void;
 }): Promise<void> {
   const provider = getProvider();
-  const ctx: Ctx = { session: opts.session, deck: structuredClone(opts.deck), emit: opts.emit, suggested: [] };
+  const ctx: Ctx = { session: opts.session, deck: structuredClone(opts.deck), emit: opts.emit, suggested: opts.session?.suggested ?? [] };
 
-  // Providers require alternating roles starting with "user".
-  const msgs: Msg[] = [];
-  for (const m of [...opts.history.slice(-16), { role: 'user' as const, content: opts.message }]) {
-    if (!m.content.trim()) continue;
-    const last = msgs[msgs.length - 1];
-    if (last && last.role === m.role) last.content = `${last.content}
-${m.content}`;
-    else msgs.push({ role: m.role, content: m.content });
-  }
-  while (msgs.length && msgs[0].role !== 'user') msgs.shift();
+  const msgs = toProviderMessages(opts.history, opts.message);
 
   const toolList = (Object.values(tools) as ToolDef[]).filter(
-    (t) => ctx.session || (t.name !== 'run_sql' && t.name !== 'suggest_insights'),
+    (t) => ctx.session || !['run_sql', 'suggest_findings', 'add_finding_slide'].includes(t.name),
   );
 
   for (let turn = 0; turn < 10; turn++) {
@@ -391,7 +452,7 @@ ${m.content}`;
         const out = await execute(ctx, call.name as ToolName, call.input);
         ctx.emit({ type: 'tool', name: call.name, summary: out.summary });
         if (out.mutated) ctx.emit({ type: 'deck', deck: structuredClone(ctx.deck) });
-        if (call.name === 'suggest_insights') ctx.emit({ type: 'insights', insights: ctx.suggested });
+        if (call.name === 'suggest_findings') ctx.emit({ type: 'findings', findings: ctx.suggested });
         results.push({ id: call.id, content: out.result });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

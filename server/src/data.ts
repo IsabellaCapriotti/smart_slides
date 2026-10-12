@@ -73,7 +73,7 @@ function median(sorted: number[]): number {
 const round = (n: number) => Math.round(n * 1000) / 1000;
 
 /** Parses one CSV, creates its table in `db`, and returns its profile. */
-function loadTable(db: Database, name: string, file: UploadedFile): TableProfile {
+function loadTable(db: Database, name: string, file: UploadedFile, warnings: string[]): TableProfile {
   const clean = file.csv.replace(/^﻿/, '');
   const parsed = Papa.parse<Record<string, string>>(clean, { header: true, skipEmptyLines: 'greedy' });
   const rawFields = parsed.meta.fields ?? [];
@@ -81,7 +81,12 @@ function loadTable(db: Database, name: string, file: UploadedFile): TableProfile
     throw new Error(`"${file.name}" looks empty, or is not a valid CSV with a header row.`);
   }
   if (parsed.data.length > MAX_ROWS_PER_FILE) {
-    throw new Error(`"${file.name}" has ${parsed.data.length.toLocaleString()} rows; the POC limit is ${MAX_ROWS_PER_FILE.toLocaleString()} per file.`);
+    const dropped = parsed.data.length - MAX_ROWS_PER_FILE;
+    warnings.push(
+      `"${file.name}": this POC only supports ${MAX_ROWS_PER_FILE.toLocaleString()} rows per file, ` +
+        `so the last ${dropped.toLocaleString()} rows of your upload have been truncated.`,
+    );
+    parsed.data.length = MAX_ROWS_PER_FILE;
   }
 
   const used = new Set<string>();
@@ -224,11 +229,12 @@ export async function loadDatasets(files: UploadedFile[]): Promise<Dataset> {
   const db = new SQL.Database();
   const used = new Set<string>();
   const tables: TableProfile[] = [];
+  const warnings: string[] = [];
   try {
     for (const file of files) {
       const base = file.name.replace(/\.[^.]+$/, '');
       const name = toIdentifier(base, used, `table_${tables.length + 1}`);
-      tables.push(loadTable(db, name, file));
+      tables.push(loadTable(db, name, file, warnings));
     }
     const total = tables.reduce((s, t) => s + t.rowCount, 0);
     if (total > MAX_ROWS_TOTAL) {
@@ -237,7 +243,7 @@ export async function loadDatasets(files: UploadedFile[]): Promise<Dataset> {
     const relationships = detectRelationships(db, tables);
     return {
       db,
-      profile: { fileName: files.map((f) => f.name).join(', '), rowCount: total, tables, relationships },
+      profile: { fileName: files.map((f) => f.name).join(', '), rowCount: total, tables, relationships, warnings },
     };
   } catch (err) {
     db.close();
